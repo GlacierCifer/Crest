@@ -288,6 +288,7 @@ final class MobileBrowserPage: NSObject, BrowserMediaSessionCommandEndpoint {
         self.webKitPage = webKitPage
         enginePage = webKitPage.makeEnginePage()
         webView = webKitPage.webView
+        MobileKeyboardAccessoryHider.installIfNeeded()
         pageEngine = webKitPage.engine
         if ownsUserContentController {
             linkActivationMessageProxy = MobileLinkActivationContentBridge.install(
