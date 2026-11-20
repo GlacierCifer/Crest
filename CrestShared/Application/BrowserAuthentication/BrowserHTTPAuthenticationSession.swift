@@ -24,6 +24,15 @@ final class BrowserHTTPAuthenticationSession {
     private var attemptedStoredCredential: BrowserCredential?
     private var attemptedProtectionSpace: BrowserHTTPAuthenticationProtectionSpace?
     private var pendingSaveRequest: BrowserHTTPAuthenticationSaveRequest?
+    /// The sign-ins this page already answered a challenge with, so a page that
+    /// loads many resources behind one Basic prompt asks once, not once per
+    /// request.
+    private var acceptedCredentials:
+        [BrowserHTTPAuthenticationProtectionSpace: (username: String, password: String)] = [:]
+    /// The prompts in flight, one per protection space, that a challenge
+    /// arriving while the person types joins instead of asking again.
+    private var pendingPrompts:
+        [BrowserHTTPAuthenticationProtectionSpace: Task<BrowserHTTPAuthenticationPromptResponse?, Never>] = [:]
 
     init(
         spaceID: UUID,
@@ -72,6 +81,13 @@ final class BrowserHTTPAuthenticationSession {
             return .performDefaultHandling
         }
 
+        if challenge.previousFailureCount > 0 {
+            acceptedCredentials[protectionSpace] = nil
+        }
+        if challenge.previousFailureCount == 0, let accepted = acceptedCredentials[protectionSpace] {
+            return credentialResolution(username: accepted.username, password: accepted.password)
+        }
+
         let rejectedCredential = rejectedCredential(
             for: protectionSpace,
             previousFailureCount: challenge.previousFailureCount
@@ -89,26 +105,42 @@ final class BrowserHTTPAuthenticationSession {
                 password: stored.password,
                 replacing: stored.descriptor
             )
+            acceptedCredentials[protectionSpace] = (
+                username: stored.descriptor.username, password: stored.password
+            )
             return credentialResolution(
                 username: stored.descriptor.username,
                 password: stored.password
             )
         }
 
-        let response = await prompt(
-            BrowserHTTPAuthenticationPrompt(
-                descriptor: challenge.descriptor,
-                suggestedUsername:
-                    challenge.proposedUsername
-                    ?? rejectedCredential?.descriptor.username,
-                allowsSaving:
-                    allowsCredentialSaving && protectionSpace.origin.isSecure
-            )
+        if let pending = pendingPrompts[protectionSpace] {
+            guard let shared = await pending.value else {
+                authenticationFailed()
+                return .cancel
+            }
+            return credentialResolution(username: shared.username, password: shared.password)
+        }
+
+        let question = BrowserHTTPAuthenticationPrompt(
+            descriptor: challenge.descriptor,
+            suggestedUsername:
+                challenge.proposedUsername
+                ?? rejectedCredential?.descriptor.username,
+            allowsSaving:
+                allowsCredentialSaving && protectionSpace.origin.isSecure
         )
+        let pendingPrompt = Task { @MainActor in await prompt(question) }
+        pendingPrompts[protectionSpace] = pendingPrompt
+        let response = await pendingPrompt.value
+        pendingPrompts[protectionSpace] = nil
         guard let response else {
             authenticationFailed()
             return .cancel
         }
+        acceptedCredentials[protectionSpace] = (
+            username: response.username, password: response.password
+        )
 
         if allowsCredentialSaving,
             response.shouldSave,
