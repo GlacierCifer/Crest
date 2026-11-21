@@ -42,7 +42,7 @@ struct WebKitSignInResponder: AuthenticationResponder {
             }
             completionHandler(
                 .useCredential,
-                URLCredential(user: credential.username, password: credential.password, persistence: .session))
+                URLCredential(user: credential.username, password: credential.password, persistence: .none))
         }
     }
 }
