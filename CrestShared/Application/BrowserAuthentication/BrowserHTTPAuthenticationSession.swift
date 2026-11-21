@@ -29,10 +29,14 @@ final class BrowserHTTPAuthenticationSession {
     /// request.
     private var acceptedCredentials:
         [BrowserHTTPAuthenticationProtectionSpace: (username: String, password: String)] = [:]
-    /// The prompts in flight, one per protection space, that a challenge
-    /// arriving while the person types joins instead of asking again.
-    private var pendingPrompts:
-        [BrowserHTTPAuthenticationProtectionSpace: Task<BrowserHTTPAuthenticationPromptResponse?, Never>] = [:]
+    /// The protection spaces whose prompt the person is answering, and the
+    /// challenges that arrived meanwhile, waiting to share the answer.
+    private var promptingSpaces: Set<BrowserHTTPAuthenticationProtectionSpace> = []
+    private var waitingForPrompt:
+        [
+            BrowserHTTPAuthenticationProtectionSpace:
+                [CheckedContinuation<BrowserHTTPAuthenticationPromptResponse?, Never>]
+        ] = [:]
 
     init(
         spaceID: UUID,
@@ -114,9 +118,12 @@ final class BrowserHTTPAuthenticationSession {
             )
         }
 
-        if let pending = pendingPrompts[protectionSpace] {
-            guard let shared = await pending.value else {
-                authenticationFailed()
+        if promptingSpaces.contains(protectionSpace) {
+            let shared = await withCheckedContinuation {
+                (continuation: CheckedContinuation<BrowserHTTPAuthenticationPromptResponse?, Never>) in
+                waitingForPrompt[protectionSpace, default: []].append(continuation)
+            }
+            guard let shared else {
                 return .cancel
             }
             return credentialResolution(username: shared.username, password: shared.password)
@@ -130,10 +137,12 @@ final class BrowserHTTPAuthenticationSession {
             allowsSaving:
                 allowsCredentialSaving && protectionSpace.origin.isSecure
         )
-        let pendingPrompt = Task { @MainActor in await prompt(question) }
-        pendingPrompts[protectionSpace] = pendingPrompt
-        let response = await pendingPrompt.value
-        pendingPrompts[protectionSpace] = nil
+        promptingSpaces.insert(protectionSpace)
+        let response = await prompt(question)
+        promptingSpaces.remove(protectionSpace)
+        for waiter in waitingForPrompt.removeValue(forKey: protectionSpace) ?? [] {
+            waiter.resume(returning: response)
+        }
         guard let response else {
             authenticationFailed()
             return .cancel
